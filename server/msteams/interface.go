@@ -16,6 +16,7 @@ type Client interface {
 	UpdateChatMessage(chatID, msgID, message string) error
 	DeleteMessage(teamID, channelID, parentID, msgID string) error
 	DeleteChatMessage(chatID, msgID string) error
+	SubscribeToMembership(baseURL, webhookSecret string) (*Subscription, error)
 	SubscribeToChannels(baseURL, webhookSecret string, pay bool) (*Subscription, error)
 	SubscribeToChats(baseURL, webhookSecret string, pay bool) (*Subscription, error)
 	SubscribeToChannel(teamID, channelID, baseURL, webhookSecret string) (*Subscription, error)
@@ -40,4 +41,8 @@ type Client interface {
 	ListUsers() ([]User, error)
 	ListTeams() ([]Team, error)
 	ListChannels(teamID string) ([]Channel, error)
+	ListChannelMembers(teamID, channelID string) ([]User, error)
+	GetMember(teamID, membershipID string) (User, error)
+	AddChannelMember(teamID, channelID, userID string) error
+	RemoveChannelMember(teamID, channelID, userID string) error
 }

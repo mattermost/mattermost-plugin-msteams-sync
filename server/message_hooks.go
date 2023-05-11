@@ -7,6 +7,7 @@ import (
 	"github.com/enescakir/emoji"
 	"github.com/mattermost/mattermost-plugin-msteams-sync/server/msteams"
 	"github.com/mattermost/mattermost-plugin-msteams-sync/server/store/storemodels"
+	"github.com/mattermost/mattermost-plugin-msteams-sync/server/utils"
 	"github.com/mattermost/mattermost-server/v6/model"
 	"github.com/mattermost/mattermost-server/v6/plugin"
 	"github.com/pkg/errors"
@@ -33,7 +34,7 @@ func (p *Plugin) MessageWillBePosted(_ *plugin.Context, post *model.Post) (*mode
 					continue
 				}
 
-				if isMSTeamsUser(*user.RemoteId, user.Username) {
+				if utils.IsMSTeamsUser(*user.RemoteId, user.Username) {
 					p.API.SendEphemeralPost(post.UserId, &model.Post{
 						Message:   "Attachments not supported in direct messages with MSTeams members",
 						UserId:    p.userID,
@@ -664,4 +665,42 @@ func (p *Plugin) GetChatIDForChannel(clientUserID string, channelID string) (str
 		return "", err
 	}
 	return chatID, nil
+}
+
+func (p *Plugin) UserHasJoinedChannel(_ *plugin.Context, channelMember *model.ChannelMember, _ *model.User) {
+	link, err := p.store.GetLinkByChannelID(channelMember.ChannelId)
+	if err != nil || link == nil {
+		return
+	}
+
+	teamsUserID, err := p.store.MattermostToTeamsUserID(channelMember.UserId)
+	if err != nil {
+		p.API.LogError("Unable to get MS teams userID", "err", err)
+		return
+	}
+
+	client := p.GetClientForApp()
+	if err := client.AddChannelMember(link.MSTeamsTeam, link.MSTeamsChannel, teamsUserID); err != nil {
+		p.API.LogError("Unable to add user to MS teams channel", "err", err)
+		return
+	}
+}
+
+func (p *Plugin) UserHasLeftChannel(_ *plugin.Context, channelMember *model.ChannelMember, _ *model.User) {
+	link, err := p.store.GetLinkByChannelID(channelMember.ChannelId)
+	if err != nil || link == nil {
+		return
+	}
+
+	teamsUserID, err := p.store.MattermostToTeamsUserID(channelMember.UserId)
+	if err != nil {
+		p.API.LogError("Unable to get MS teams userID", "err", err)
+		return
+	}
+
+	client := p.GetClientForApp()
+	if err := client.RemoveChannelMember(link.MSTeamsTeam, link.MSTeamsChannel, teamsUserID); err != nil {
+		p.API.LogError("Unable to remove user from MS teams channel", "err", err)
+		return
+	}
 }
