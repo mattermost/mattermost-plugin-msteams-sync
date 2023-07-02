@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base32"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"math"
 	"math/big"
@@ -145,7 +148,7 @@ func (p *Plugin) start(syncSince *time.Time) {
 		return
 	}
 
-	p.monitor = monitor.New(p.msteamsAppClient, p.store, p.API, p.GetURL()+"/", p.getConfiguration().WebhookSecret, p.getConfiguration().EvaluationAPI)
+	p.monitor = monitor.New(p.msteamsAppClient, p.store, p.API, p.GetURL()+"/", p.getConfiguration().WebhookSecret, p.getConfiguration().EvaluationAPI, p.getBase64Certificate())
 	if err = p.monitor.Start(); err != nil {
 		p.API.LogError("Unable to start the monitoring system", "error", err)
 	}
@@ -167,6 +170,37 @@ func (p *Plugin) start(syncSince *time.Time) {
 func (p *Plugin) syncSince(syncSince time.Time) {
 	// TODO: Implement the sync mechanism
 	p.API.LogDebug("Syncing since", "date", syncSince)
+}
+
+func (p *Plugin) getBase64Certificate() string {
+	certificate := p.getConfiguration().CertificatePublic
+	if certificate == "" {
+		return ""
+	}
+	block, _ := pem.Decode([]byte(certificate))
+	return base64.StdEncoding.EncodeToString(pem.EncodeToMemory(block))
+}
+
+func (p *Plugin) getPrivateKey() (*rsa.PrivateKey, error) {
+	keyPemString := p.getConfiguration().CertificateKey
+	if keyPemString == "" {
+		return nil, errors.New("certificate private key not configured")
+	}
+	privPem, _ := pem.Decode([]byte(keyPemString))
+	var err error
+	var parsedKey any
+	if parsedKey, err = x509.ParsePKCS8PrivateKey(privPem.Bytes); err != nil { // note this returns type `interface{}`
+		return nil, err
+	}
+
+	var privateKey *rsa.PrivateKey
+	var ok bool
+	privateKey, ok = parsedKey.(*rsa.PrivateKey)
+	if !ok {
+		return nil, errors.New("Not valid key")
+	}
+
+	return privateKey, nil
 }
 
 func (p *Plugin) startSubscriptions() {
@@ -204,7 +238,7 @@ func (p *Plugin) startSubscriptions() {
 	ws <- struct{}{}
 	go func() {
 		defer wg.Done()
-		chatsSubscription, err := p.msteamsAppClient.SubscribeToChats(p.GetURL()+"/", p.getConfiguration().WebhookSecret, !p.getConfiguration().EvaluationAPI)
+		chatsSubscription, err := p.msteamsAppClient.SubscribeToChats(p.GetURL()+"/", p.getConfiguration().WebhookSecret, !p.getConfiguration().EvaluationAPI, p.getBase64Certificate())
 		if err != nil {
 			p.API.LogError("Unable to subscribe to chats", "error", err)
 			// Mark this subscription to be created and retried by the monitor system
@@ -238,7 +272,7 @@ func (p *Plugin) startSubscriptions() {
 		wg.Add(1)
 		go func(link storemodels.ChannelLink) {
 			defer wg.Done()
-			channelsSubscription, err2 := p.msteamsAppClient.SubscribeToChannel(link.MSTeamsTeam, link.MSTeamsChannel, p.GetURL()+"/", p.getConfiguration().WebhookSecret)
+			channelsSubscription, err2 := p.msteamsAppClient.SubscribeToChannel(link.MSTeamsTeam, link.MSTeamsChannel, p.GetURL()+"/", p.getConfiguration().WebhookSecret, p.getBase64Certificate())
 			if err2 != nil {
 				p.API.LogError("Unable to subscribe to channels", "error", err2)
 				// Mark this subscription to be created and retried by the monitor system

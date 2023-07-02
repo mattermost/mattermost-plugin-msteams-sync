@@ -127,6 +127,15 @@ type Activity struct {
 	LifecycleEvent                 string
 	SubscriptionExpirationDateTime time.Time
 	SubscriptionID                 string
+	EncryptedContent               *EncryptedContent
+	Content                        []byte
+}
+
+type EncryptedContent struct {
+	Data                    string
+	DataKey                 string
+	DataSignature           string
+	EncryptionCertificateID string
 }
 
 type ActivityIds struct {
@@ -644,7 +653,7 @@ func (tc *ClientImpl) UpdateChatMessage(chatID, msgID, message string, mentions 
 	return nil
 }
 
-func (tc *ClientImpl) subscribe(baseURL, webhookSecret, resource, changeType string) (*Subscription, error) {
+func (tc *ClientImpl) subscribe(baseURL, webhookSecret, resource, changeType, certificate string) (*Subscription, error) {
 	expirationDateTime := time.Now().Add(30 * time.Minute)
 
 	subscriptionsRes, err := tc.client.Subscriptions().Get(tc.ctx, nil)
@@ -680,6 +689,13 @@ func (tc *ClientImpl) subscribe(baseURL, webhookSecret, resource, changeType str
 	subscription.SetLifecycleNotificationUrl(&lifecycleNotificationURL)
 	subscription.SetClientState(&webhookSecret)
 	subscription.SetChangeType(&changeType)
+	if certificate != "" {
+		subscription.SetEncryptionCertificate(&certificate)
+		certificateID := "msteams-sync"
+		subscription.SetEncryptionCertificateId(&certificateID)
+		includeResourceData := true
+		subscription.SetIncludeResourceData(&includeResourceData)
+	}
 
 	if existingSubscription != nil {
 		if *existingSubscription.GetChangeType() != changeType || *existingSubscription.GetLifecycleNotificationUrl() != lifecycleNotificationURL || *existingSubscription.GetNotificationUrl() != notificationURL || *existingSubscription.GetClientState() != webhookSecret {
@@ -715,37 +731,37 @@ func (tc *ClientImpl) subscribe(baseURL, webhookSecret, resource, changeType str
 	}, nil
 }
 
-func (tc *ClientImpl) SubscribeToChannels(baseURL, webhookSecret string, pay bool) (*Subscription, error) {
+func (tc *ClientImpl) SubscribeToChannels(baseURL, webhookSecret string, pay bool, certificate string) (*Subscription, error) {
 	resource := "teams/getAllMessages"
 	if pay {
 		resource = "teams/getAllMessages?model=B"
 	}
 	changeType := "created,deleted,updated"
-	return tc.subscribe(baseURL, webhookSecret, resource, changeType)
+	return tc.subscribe(baseURL, webhookSecret, resource, changeType, certificate)
 }
 
-func (tc *ClientImpl) SubscribeToChannel(teamID, channelID, baseURL, webhookSecret string) (*Subscription, error) {
+func (tc *ClientImpl) SubscribeToChannel(teamID, channelID, baseURL, webhookSecret string, certificate string) (*Subscription, error) {
 	resource := fmt.Sprintf("/teams/%s/channels/%s/messages", teamID, channelID)
 	changeType := "created,deleted,updated"
-	return tc.subscribe(baseURL, webhookSecret, resource, changeType)
+	return tc.subscribe(baseURL, webhookSecret, resource, changeType, certificate)
 }
 
-func (tc *ClientImpl) SubscribeToChats(baseURL, webhookSecret string, pay bool) (*Subscription, error) {
+func (tc *ClientImpl) SubscribeToChats(baseURL, webhookSecret string, pay bool, certificate string) (*Subscription, error) {
 	resource := "chats/getAllMessages"
 	if pay {
 		resource = "chats/getAllMessages?model=B"
 	}
 	changeType := "created,deleted,updated"
-	return tc.subscribe(baseURL, webhookSecret, resource, changeType)
+	return tc.subscribe(baseURL, webhookSecret, resource, changeType, certificate)
 }
 
-func (tc *ClientImpl) SubscribeToUserChats(userID, baseURL, webhookSecret string, pay bool) (*Subscription, error) {
+func (tc *ClientImpl) SubscribeToUserChats(userID, baseURL, webhookSecret string, pay bool, certificate string) (*Subscription, error) {
 	resource := fmt.Sprintf("/users/%s/chats/getAllMessages", userID)
 	if pay {
 		resource = fmt.Sprintf("/users/%s/chats/getAllMessages?model=B", userID)
 	}
 	changeType := "created,deleted,updated"
-	return tc.subscribe(baseURL, webhookSecret, resource, changeType)
+	return tc.subscribe(baseURL, webhookSecret, resource, changeType, certificate)
 }
 
 func (tc *ClientImpl) RefreshSubscription(subscriptionID string) (*time.Time, error) {
@@ -1022,6 +1038,91 @@ func (tc *ClientImpl) GetReply(teamID, channelID, messageID, replyID string) (*M
 	}
 
 	return convertToMessage(res, teamID, channelID, ""), nil
+}
+
+func GetMessageFromJSON(data []byte, teamID, channelID, chatID string) (*Message, error) {
+	msg := struct {
+		ID   string
+		From struct {
+			User struct {
+				ID          string
+				DisplayName string
+			}
+		}
+		ReplyToID string
+		Subject   string
+		Body      struct {
+			Content string
+		}
+		LastModifiedDateTime time.Time
+		Attachments          []Attachment
+		Mentions             []struct {
+			ID          int32
+			MentionText string
+			Mentioned   struct {
+				User struct {
+					ID string
+				}
+			}
+		}
+		Reactions []struct {
+			ReactionType string
+			User         struct {
+				User struct {
+					ID string
+				}
+			}
+		}
+	}{}
+
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return nil, err
+	}
+	userID := msg.From.User.ID
+	userDisplayName := msg.From.User.DisplayName
+	replyTo := msg.ReplyToID
+
+	text := msg.Body.Content
+	msgID := msg.ID
+	subject := msg.Subject
+	lastUpdateAt := msg.LastModifiedDateTime
+
+	attachments := msg.Attachments
+
+	mentions := []Mention{}
+	for _, m := range msg.Mentions {
+		mention := Mention{}
+		if m.ID != 0 && m.MentionText != "" {
+			mention.ID = m.ID
+			mention.MentionedText = m.MentionText
+		} else {
+			continue
+		}
+
+		mention.UserID = m.Mentioned.User.ID
+		mentions = append(mentions, mention)
+	}
+
+	reactions := []Reaction{}
+	for _, reaction := range msg.Reactions {
+		reactions = append(reactions, Reaction{UserID: reaction.User.User.ID, Reaction: reaction.ReactionType})
+	}
+
+	return &Message{
+		ID:              msgID,
+		UserID:          userID,
+		UserDisplayName: userDisplayName,
+		Text:            text,
+		ReplyToID:       replyTo,
+		Subject:         subject,
+		Attachments:     attachments,
+		Mentions:        mentions,
+		TeamID:          teamID,
+		ChannelID:       channelID,
+		ChatID:          chatID,
+		Reactions:       reactions,
+		LastUpdateAt:    lastUpdateAt,
+	}, nil
 }
 
 func (tc *ClientImpl) GetUserAvatar(userID string) ([]byte, error) {
